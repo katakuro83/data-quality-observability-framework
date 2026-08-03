@@ -1,0 +1,89 @@
+"""
+test_anomaly_detector.py
+"""
+
+import os
+import tempfile
+
+import pytest
+
+from src.metrics_store.metrics_repository import MetricsRepository
+from src.anomaly_detection.anomaly_detector import AnomalyDetector
+
+
+@pytest.fixture
+def repo():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    repository = MetricsRepository(path)
+    yield repository
+    repository.close()
+    os.remove(path)
+
+
+def seed_stable_history(repo, dataset="fct_orders", metric="row_count", values=None):
+    values = values or [1000, 1010, 990, 1005, 995, 1002, 998]
+    for v in values:
+        repo.record_metric(dataset, metric, v)
+
+
+def test_insufficient_history_skips_check(repo):
+    repo.record_metric("fct_orders", "row_count", 1000)  # only 1 point
+    detector = AnomalyDetector(repo, min_history_points=5)
+
+    result = detector.check("fct_orders", "row_count", current_value=1500)
+
+    assert result.is_anomaly is False
+    assert "insufficient history" in result.reason
+
+
+def test_value_within_normal_range_is_not_anomaly(repo):
+    seed_stable_history(repo)
+    detector = AnomalyDetector(repo, z_score_threshold=3.0)
+
+    result = detector.check("fct_orders", "row_count", current_value=1003)
+
+    assert result.is_anomaly is False
+
+
+def test_large_deviation_is_flagged_as_anomaly(repo):
+    seed_stable_history(repo)  # mean ~1000, small stdev
+    detector = AnomalyDetector(repo, z_score_threshold=3.0)
+
+    # A sudden drop to 200 rows should be way outside 3 standard deviations
+    result = detector.check("fct_orders", "row_count", current_value=200)
+
+    assert result.is_anomaly is True
+    assert result.z_score < 0  # below the mean
+    assert "below" in result.reason
+
+
+def test_sudden_spike_is_flagged_as_anomaly(repo):
+    seed_stable_history(repo)
+    detector = AnomalyDetector(repo, z_score_threshold=3.0)
+
+    result = detector.check("fct_orders", "row_count", current_value=50000)
+
+    assert result.is_anomaly is True
+    assert result.z_score > 0
+    assert "above" in result.reason
+
+
+def test_zero_variance_history_flags_any_change(repo):
+    seed_stable_history(repo, values=[100, 100, 100, 100, 100])
+    detector = AnomalyDetector(repo)
+
+    result = detector.check("fct_orders", "row_count", current_value=150)
+
+    assert result.is_anomaly is True
+    assert "zero historical variance" in result.reason
+
+
+def test_alert_message_formats_correctly_for_anomaly(repo):
+    seed_stable_history(repo)
+    detector = AnomalyDetector(repo, z_score_threshold=3.0)
+    result = detector.check("fct_orders", "row_count", current_value=50000)
+
+    message = result.to_alert_message()
+    assert "DQ ANOMALY" in message
+    assert "fct_orders.row_count" in message
