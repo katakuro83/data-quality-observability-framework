@@ -1,0 +1,46 @@
+"""
+lineage_tracker.py
+
+Records source -> target dataset relationships each time a pipeline
+task runs, and can render the accumulated lineage graph as a Mermaid
+diagram. This is intentionally lightweight (no separate lineage
+service to run) -- it piggybacks on the same MetricsRepository used
+for check results and metrics, so lineage is a byproduct of running
+the framework rather than a separate manual exercise.
+
+"""
+
+from typing import List
+
+from src.metrics_store.metrics_repository import MetricsRepository
+
+
+class LineageTracker:
+    def __init__(self, repository: MetricsRepository):
+        self.repository = repository
+
+    def record(self, source_datasets: List[str], target_dataset: str, pipeline_task: str) -> None:
+        self.repository.record_lineage_event(source_datasets, target_dataset, pipeline_task)
+
+    def render_mermaid(self) -> str:
+        """Renders all recorded lineage events as a Mermaid flowchart."""
+        events = self.repository.get_lineage_events()
+
+        lines = ["flowchart LR"]
+        seen_edges = set()
+
+        for event in events:
+            sources = [s for s in event.source_datasets.split(",") if s]
+            for source in sources:
+                edge = (source, event.target_dataset)
+                if edge in seen_edges:
+                    continue
+                seen_edges.add(edge)
+                safe_source = source.replace("-", "_")
+                safe_target = event.target_dataset.replace("-", "_")
+                lines.append(f"    {safe_source}[{source}] --> {safe_target}[{event.target_dataset}]")
+
+        if len(lines) == 1:
+            return "flowchart LR\n    no_lineage_recorded[No lineage events recorded yet]"
+
+        return "\n".join(lines)
