@@ -1,0 +1,150 @@
+"""
+metrics_repository.py
+
+Central store for data quality check results, metric history, and
+lineage events. Uses SQLite by default (zero setup, works anywhere)
+but the schema translates directly to Postgres for production use --
+swap the connection in __init__ and the rest of the class is unchanged.
+"""
+
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import List, Optional
+
+
+@dataclass
+class CheckResult:
+    dataset_name: str
+    check_name: str
+    check_source: str          # 'dbt' | 'great_expectations' | 'custom'
+    status: str                # 'pass' | 'fail'
+    details: str
+    executed_at: str
+
+
+@dataclass
+class MetricRecord:
+    dataset_name: str
+    metric_name: str
+    metric_value: float
+    recorded_at: str
+
+
+@dataclass
+class LineageEvent:
+    source_datasets: str       # comma separated list of upstream dataset names
+    target_dataset: str
+    pipeline_task: str
+    recorded_at: str
+
+
+class MetricsRepository:
+    """
+    Thin, dependency free persistence layer. Every write goes through
+    a method here so callers (dbt parser, GE runner, lineage tracker,
+    anomaly detector) never touch SQL directly.
+    """
+
+    def __init__(self, db_path: str = "dq_metrics.db"):
+        self.db_path = db_path
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS check_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_name TEXT NOT NULL,
+                check_name TEXT NOT NULL,
+                check_source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                details TEXT,
+                executed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS metric_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_name TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS lineage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_datasets TEXT NOT NULL,
+                target_dataset TEXT NOT NULL,
+                pipeline_task TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_metric_history_lookup
+                ON metric_history (dataset_name, metric_name, recorded_at);
+            """
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    # --- writes ---
+
+    def record_check_result(
+        self, dataset_name: str, check_name: str, check_source: str,
+        status: str, details: str = ""
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO check_results (dataset_name, check_name, check_source, status, details, executed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (dataset_name, check_name, check_source, status, details, self._now()),
+        )
+        self._conn.commit()
+
+    def record_metric(self, dataset_name: str, metric_name: str, metric_value: float) -> None:
+        self._conn.execute(
+            "INSERT INTO metric_history (dataset_name, metric_name, metric_value, recorded_at) "
+            "VALUES (?, ?, ?, ?)",
+            (dataset_name, metric_name, metric_value, self._now()),
+        )
+        self._conn.commit()
+
+    def record_lineage_event(self, source_datasets: List[str], target_dataset: str, pipeline_task: str) -> None:
+        self._conn.execute(
+            "INSERT INTO lineage_events (source_datasets, target_dataset, pipeline_task, recorded_at) "
+            "VALUES (?, ?, ?, ?)",
+            (",".join(source_datasets), target_dataset, pipeline_task, self._now()),
+        )
+        self._conn.commit()
+
+    # --- reads ---
+
+    def get_metric_history(self, dataset_name: str, metric_name: str, limit: int = 30) -> List[MetricRecord]:
+        rows = self._conn.execute(
+            "SELECT dataset_name, metric_name, metric_value, recorded_at FROM metric_history "
+            "WHERE dataset_name = ? AND metric_name = ? "
+            "ORDER BY recorded_at DESC LIMIT ?",
+            (dataset_name, metric_name, limit),
+        ).fetchall()
+        return [MetricRecord(**dict(r)) for r in rows]
+
+    def get_failed_checks(self, since: Optional[str] = None) -> List[CheckResult]:
+        query = "SELECT dataset_name, check_name, check_source, status, details, executed_at FROM check_results WHERE status = 'fail'"
+        params = ()
+        if since:
+            query += " AND executed_at >= ?"
+            params = (since,)
+        rows = self._conn.execute(query, params).fetchall()
+        return [CheckResult(**dict(r)) for r in rows]
+
+    def get_lineage_events(self) -> List[LineageEvent]:
+        rows = self._conn.execute(
+            "SELECT source_datasets, target_dataset, pipeline_task, recorded_at FROM lineage_events"
+        ).fetchall()
+        return [LineageEvent(**dict(r)) for r in rows]
+
+    def close(self) -> None:
+        self._conn.close()
