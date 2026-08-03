@@ -14,7 +14,7 @@ Most pipelines have *some* data quality checks, but three gaps show up repeatedl
 ┌─────────────────┐     ┌──────────────────┐     ┌────────────────┐
 │  dbt test       │     │Great Expectations│     │  Lineage events│
 │  (schema tests) │      (distribution/    │     │  (source ->    │
-│  results parsed │     │business-rule     │     │  target per run│
+│  results parsed │     │business rule     │     │  target per run│
 │from run_results.│     │  checkpoints)    │     │                │
 │  json           │     │                  │     │                │
 └────────┬─────────┘    └──────────┬───────┘     └────────┬───────┘
@@ -27,7 +27,7 @@ Most pipelines have *some* data quality checks, but three gaps show up repeatedl
                 └────────┬─────────┘
                           ▼
                 ┌──────────────────┐
-                │ Anomaly detector │   <- statistical (z-score) comparison
+                │ Anomaly detector │   <- statistical (z score) comparison
                 │                  │      against historical metric values
                 └────────┬─────────┘
                           ▼
@@ -91,6 +91,6 @@ data-quality-framework-great-expectations/
 - Add OpenLineage/Marquez integration for a standards-based lineage backend instead of the custom lightweight tracker
 - Add a small dashboard (Streamlit/Metabase) reading directly from `metrics_repository` for a visual DQ trend view
 - Add PagerDuty/Opsgenie as an `AlertDispatcher` implementation for on call escalation
-- Extend anomaly detection with seasonality awareness (e.g., day of-week baselines) rather than a flat trailing window
+- Extend anomaly detection with seasonality awareness (e.g., day of week baselines) rather than a flat trailing window
 
 ---
