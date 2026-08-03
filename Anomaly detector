@@ -1,0 +1,91 @@
+"""
+anomaly_detector.py
+
+Statistical anomaly detection: flags a metric value as anomalous if
+it deviates more than N standard deviations from the mean of its own
+recent history, rather than relying on a hardcoded threshold that
+goes stale as the dataset grows.
+"""
+
+import statistics
+from dataclasses import dataclass
+from typing import Optional
+
+from src.metrics_store.metrics_repository import MetricsRepository
+
+
+@dataclass
+class AnomalyResult:
+    dataset_name: str
+    metric_name: str
+    current_value: float
+    historical_mean: Optional[float]
+    historical_stdev: Optional[float]
+    z_score: Optional[float]
+    is_anomaly: bool
+    reason: str
+
+    def to_alert_message(self) -> str:
+        return (
+            f"[DQ ANOMALY] {self.dataset_name}.{self.metric_name} = {self.current_value} "
+            f"(historical mean={self.historical_mean:.2f}, z-score={self.z_score:.2f}) — {self.reason}"
+            if self.is_anomaly
+            else f"{self.dataset_name}.{self.metric_name} within normal range."
+        )
+
+
+class AnomalyDetector:
+    """
+    Compares a new metric value against the trailing history for that
+    exact (dataset, metric) pair stored in the MetricsRepository.
+    """
+
+    def __init__(self, repository: MetricsRepository, z_score_threshold: float = 3.0, min_history_points: int = 5):
+        self.repository = repository
+        self.z_score_threshold = z_score_threshold
+        self.min_history_points = min_history_points
+
+    def check(self, dataset_name: str, metric_name: str, current_value: float, history_window: int = 30) -> AnomalyResult:
+        history = self.repository.get_metric_history(dataset_name, metric_name, limit=history_window)
+        values = [h.metric_value for h in history]
+
+        if len(values) < self.min_history_points:
+            return AnomalyResult(
+                dataset_name=dataset_name,
+                metric_name=metric_name,
+                current_value=current_value,
+                historical_mean=None,
+                historical_stdev=None,
+                z_score=None,
+                is_anomaly=False,
+                reason=f"insufficient history ({len(values)}/{self.min_history_points} points) -- skipping anomaly check",
+            )
+
+        mean = statistics.mean(values)
+        stdev = statistics.pstdev(values)
+
+        if stdev == 0:
+            # No variance in history -- any deviation at all is notable
+            is_anomaly = current_value != mean
+            z_score = float("inf") if is_anomaly else 0.0
+            reason = "zero historical variance; value differs from the constant historical value" if is_anomaly else "matches constant historical value"
+        else:
+            z_score = (current_value - mean) / stdev
+            is_anomaly = abs(z_score) > self.z_score_threshold
+            direction = "above" if z_score > 0 else "below"
+            reason = (
+                f"{abs(z_score):.2f} standard deviations {direction} the trailing {len(values)}-run average"
+                if is_anomaly
+                else "within normal range"
+            )
+
+        return AnomalyResult(
+            dataset_name=dataset_name,
+            metric_name=metric_name,
+            current_value=current_value,
+            historical_mean=mean,
+            historical_stdev=stdev,
+            z_score=z_score,
+            is_anomaly=is_anomaly,
+            reason=reason,
+        )
