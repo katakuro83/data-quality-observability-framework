@@ -1,0 +1,93 @@
+"""
+parse_dbt_results.py
+
+Reads dbt's standard `target/run_results.json` artifact (produced by
+every `dbt run` / `dbt test` / `dbt build`) and records each test's
+pass/fail status into the shared MetricsRepository. This is what lets
+dbt test results and Great Expectations results live in one history
+instead of two disconnected ones.
+
+No dbt Cloud API or special dbt configuration required -- this works
+against the standard local artifact any dbt project produces.
+
+Usage:
+    python parse_dbt_results.py --run-results target/run_results.json --db dq_metrics.db
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.metrics_store.metrics_repository import MetricsRepository
+
+
+def parse_run_results(run_results_path: str) -> list:
+    """Extracts (unique_id, status, message) tuples for every test-type
+    result in a dbt run_results.json file."""
+    with open(run_results_path) as f:
+        data = json.load(f)
+
+    results = []
+    for result in data.get("results", []):
+        # dbt marks test nodes with unique_id starting with "test."
+        if result.get("unique_id", "").startswith("test."):
+            results.append({
+                "unique_id": result["unique_id"],
+                "status": result["status"],   # 'pass', 'fail', 'error', 'skipped'
+                "message": result.get("message") or "",
+            })
+    return results
+
+
+def dataset_name_from_test_unique_id(unique_id: str) -> str:
+    """
+    dbt test unique_ids look like:
+        test.my_project.not_null_fct_orders_order_id.<hash>
+    We take a best effort guess at the underlying model name by
+    stripping the test type prefix and project name. For exact
+    mapping, prefer parsing the manifest.json's node "depends_on"
+    instead -- kept simple here for portfolio clarity.
+    """
+    parts = unique_id.split(".")
+    return parts[2] if len(parts) > 2 else unique_id
+
+
+def load_dbt_results_into_repository(run_results_path: str, repository: MetricsRepository) -> dict:
+    results = parse_run_results(run_results_path)
+
+    summary = {"pass": 0, "fail": 0, "error": 0, "skipped": 0}
+
+    for r in results:
+        dataset_name = dataset_name_from_test_unique_id(r["unique_id"])
+        status = "pass" if r["status"] == "pass" else "fail"
+
+        repository.record_check_result(
+            dataset_name=dataset_name,
+            check_name=r["unique_id"],
+            check_source="dbt",
+            status=status,
+            details=r["message"],
+        )
+        summary[r["status"]] = summary.get(r["status"], 0) + 1
+
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Parse dbt run_results.json into the DQ metrics store")
+    parser.add_argument("--run-results", required=True, help="Path to dbt's run_results.json")
+    parser.add_argument("--db", default="dq_metrics.db", help="Path to the metrics SQLite DB")
+    args = parser.parse_args()
+
+    repository = MetricsRepository(args.db)
+    summary = load_dbt_results_into_repository(args.run_results, repository)
+    repository.close()
+
+    print(f"Loaded dbt test results: {summary}")
+
+
+if __name__ == "__main__":
+    main()
