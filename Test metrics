@@ -1,0 +1,60 @@
+"""
+test_metrics_repository.py
+
+Runs against a real (temporary) SQLite file -- no mocking needed
+since SQLite is part of the Python stdlib.
+"""
+
+import os
+import tempfile
+
+import pytest
+
+from src.metrics_store.metrics_repository import MetricsRepository
+
+
+@pytest.fixture
+def repo():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    repository = MetricsRepository(path)
+    yield repository
+    repository.close()
+    os.remove(path)
+
+
+def test_record_and_retrieve_metric(repo):
+    repo.record_metric("fct_orders", "row_count", 100)
+    repo.record_metric("fct_orders", "row_count", 105)
+
+    history = repo.get_metric_history("fct_orders", "row_count")
+    assert len(history) == 2
+    assert history[0].metric_value == 105  # most recent first
+
+
+def test_record_check_result_and_query_failures(repo):
+    repo.record_check_result("fct_orders", "not_null_order_id", "dbt", "pass")
+    repo.record_check_result("fct_orders", "unique_order_id", "dbt", "fail", details="2 duplicate rows found")
+
+    failures = repo.get_failed_checks()
+    assert len(failures) == 1
+    assert failures[0].check_name == "unique_order_id"
+    assert "duplicate" in failures[0].details
+
+
+def test_lineage_event_roundtrip(repo):
+    repo.record_lineage_event(["raw_orders", "raw_customers"], "stg_orders", "dbt_run")
+    repo.record_lineage_event(["stg_orders"], "fct_orders", "dbt_run")
+
+    events = repo.get_lineage_events()
+    assert len(events) == 2
+    assert events[0].target_dataset == "stg_orders"
+    assert "raw_orders" in events[0].source_datasets
+
+
+def test_metric_history_respects_limit(repo):
+    for i in range(10):
+        repo.record_metric("dataset_x", "metric_y", i)
+
+    history = repo.get_metric_history("dataset_x", "metric_y", limit=3)
+    assert len(history) == 3
