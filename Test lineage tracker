@@ -1,0 +1,51 @@
+"""
+test_lineage_tracker.py
+"""
+
+import os
+import tempfile
+
+import pytest
+
+from src.metrics_store.metrics_repository import MetricsRepository
+from src.lineage.lineage_tracker import LineageTracker
+
+
+@pytest.fixture
+def repo():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    repository = MetricsRepository(path)
+    yield repository
+    repository.close()
+    os.remove(path)
+
+
+def test_empty_lineage_renders_placeholder(repo):
+    tracker = LineageTracker(repo)
+    graph = tracker.render_mermaid()
+    assert "No lineage events recorded yet" in graph
+
+
+def test_lineage_renders_edges(repo):
+    tracker = LineageTracker(repo)
+    tracker.record(["raw_orders", "raw_customers"], "stg_orders", "dbt_run")
+    tracker.record(["stg_orders"], "fct_orders", "dbt_run")
+
+    graph = tracker.render_mermaid()
+
+    assert "flowchart LR" in graph
+    assert "raw_orders" in graph
+    assert "stg_orders" in graph
+    assert "fct_orders" in graph
+    assert "-->" in graph
+
+
+def test_duplicate_edges_are_not_repeated(repo):
+    tracker = LineageTracker(repo)
+    tracker.record(["raw_orders"], "stg_orders", "dbt_run_1")
+    tracker.record(["raw_orders"], "stg_orders", "dbt_run_2")  # same edge, different run
+
+    graph = tracker.render_mermaid()
+    # the edge raw_orders -> stg_orders should appear exactly once
+    assert graph.count("raw_orders[raw_orders] --> stg_orders[stg_orders]") == 1
