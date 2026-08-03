@@ -5,6 +5,7 @@ Central store for data quality check results, metric history, and
 lineage events. Uses SQLite by default (zero setup, works anywhere)
 but the schema translates directly to Postgres for production use --
 swap the connection in __init__ and the rest of the class is unchanged.
+
 """
 
 import sqlite3
