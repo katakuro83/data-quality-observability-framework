@@ -1,0 +1,27 @@
+"""
+test_alert_dispatcher.py
+"""
+
+from src.alerting.alert_dispatcher import (
+    InMemoryAlertDispatcher,
+    CompositeAlertDispatcher,
+)
+
+
+def test_in_memory_dispatcher_collects_messages():
+    dispatcher = InMemoryAlertDispatcher()
+    dispatcher.send("first alert")
+    dispatcher.send("second alert")
+
+    assert dispatcher.sent_messages == ["first alert", "second alert"]
+
+
+def test_composite_dispatcher_fans_out_to_all():
+    d1 = InMemoryAlertDispatcher()
+    d2 = InMemoryAlertDispatcher()
+    composite = CompositeAlertDispatcher([d1, d2])
+
+    composite.send("broadcast alert")
+
+    assert d1.sent_messages == ["broadcast alert"]
+    assert d2.sent_messages == ["broadcast alert"]
