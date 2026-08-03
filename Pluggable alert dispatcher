@@ -1,0 +1,90 @@
+"""
+alert_dispatcher.py
+
+Pluggable notification interface. Swap implementations without
+touching any calling code -- the anomaly detector and check result
+handlers only ever call `.send(message)`.
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Optional
+
+
+class AlertDispatcher(ABC):
+    @abstractmethod
+    def send(self, message: str) -> None:
+        ...
+
+
+class ConsoleAlertDispatcher(AlertDispatcher):
+    """Default for local development and testing -- just prints."""
+
+    def send(self, message: str) -> None:
+        print(f"[ALERT] {message}")
+
+
+class InMemoryAlertDispatcher(AlertDispatcher):
+    """Collects alerts in a list instead of sending anywhere -- used in tests
+    to assert on what *would* have been sent, without any network calls."""
+
+    def __init__(self):
+        self.sent_messages: List[str] = []
+
+    def send(self, message: str) -> None:
+        self.sent_messages.append(message)
+
+
+class SlackAlertDispatcher(AlertDispatcher):
+    """
+    Posts to a Slack incoming webhook. Requires the `requests` package
+    and a configured webhook URL -- not installed by default since the
+    core framework has zero external dependencies.
+    """
+
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
+
+    def send(self, message: str) -> None:
+        import requests  # local import: only required if this dispatcher is actually used
+
+        response = requests.post(self.webhook_url, json={"text": message}, timeout=10)
+        response.raise_for_status()
+
+
+class EmailAlertDispatcher(AlertDispatcher):
+    """Sends alerts via SMTP. Configure with your organization's mail relay."""
+
+    def __init__(self, smtp_host: str, smtp_port: int, from_address: str, to_addresses: List[str],
+                 smtp_username: Optional[str] = None, smtp_password: Optional[str] = None):
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.from_address = from_address
+        self.to_addresses = to_addresses
+        self.smtp_username = smtp_username
+        self.smtp_password = smtp_password
+
+    def send(self, message: str) -> None:
+        import smtplib
+        from email.mime.text import MIMEText
+
+        msg = MIMEText(message)
+        msg["Subject"] = "Data Quality Alert"
+        msg["From"] = self.from_address
+        msg["To"] = ", ".join(self.to_addresses)
+
+        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+            server.starttls()
+            if self.smtp_username:
+                server.login(self.smtp_username, self.smtp_password)
+            server.sendmail(self.from_address, self.to_addresses, msg.as_string())
+
+
+class CompositeAlertDispatcher(AlertDispatcher):
+    """Fans a single alert out to multiple dispatchers, e.g. Slack + email at once."""
+
+    def __init__(self, dispatchers: List[AlertDispatcher]):
+        self.dispatchers = dispatchers
+
+    def send(self, message: str) -> None:
+        for dispatcher in self.dispatchers:
+            dispatcher.send(message)
