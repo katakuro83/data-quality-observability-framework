@@ -1,0 +1,42 @@
+# Architecture Deep Dive
+
+## The Problem With "Data Quality Checks" as Usually Implemented
+
+Most pipelines end up with data quality logic scattered and disconnected:
+- dbt tests fail silently unless someone reads CI logs
+- A separate Great Expectations setup (if it exists) has its own data docs nobody checks regularly
+- "Lineage" lives in someone's head or a stale wiki diagram
+
+This framework's core design decision is: **one shared history for everything**, regardless of which tool produced the check result.
+
+## Why a Custom Metrics Store Instead of Just Using dbt Cloud
+
+Both dbt Cloud and Great Expectations Cloud have their own hosted result stores but they don't share one with each other, and using either forces a vendor dependency this framework doesn't need. `MetricsRepository` is a ~150 line SQLite backed class with a schema that translates directly to Postgres. It's not trying to replace dedicated observability platforms (Monte Carlo, Bigeye, etc.) it's a lightweight, fully owned alternative for teams that want the pattern without the platform.
+
+## Why Z Score Anomaly Detection, Not Fixed Thresholds
+
+A hardcoded rule like `row_count > 10000` goes stale the moment the business grows either it never fires (too low) or it fires constantly as a nuisance once the dataset naturally exceeds old assumptions (too high, inverted). The `AnomalyDetector` instead asks: **is this value unusual relative to this dataset's own recent history?**
+
+```python
+z_score = (current_value - historical_mean) / historical_stdev
+is_anomaly = abs(z_score) > threshold   # default threshold: 3.0
+```
+
+This means the check adapts automatically as a dataset grows or its baseline shifts, without anyone updating a config file. The trade off: it needs enough history to be meaningful (`min_history_points`, default 5) a brand new dataset can't be anomaly checked on day one, and the framework explicitly skips (not fails) the check in that case rather than producing a meaningless comparison.
+
+## Why Lineage Is a Byproduct, Not a Separate System
+
+Dedicated lineage tools (OpenLineage/Marquez, dbt's own DAG) are more complete, but they require running and maintaining a separate service. This framework's `LineageTracker` takes the pragmatic middle path: every time a pipeline task runs a check, it also records what fed into what. Over time, that accumulates into a real lineage graph rendered as Mermaid so it displays natively in GitHub/most docs tools with zero additional infrastructure.
+
+**When to graduate to a real lineage tool:** if you need cross team, cross-tool lineage (e.g., tracing from a BI dashboard back through five different pipelines owned by different teams), OpenLineage's standardized event model and Marquez's graph UI are worth the operational overhead that this lightweight tracker deliberately avoids.
+
+## Why the Alert Dispatcher Is an Interface, Not a Function
+
+`AlertDispatcher` is an abstract base class with one method (`send`). This is a deliberate, minimal use of the Strategy pattern: the anomaly detector and check result handlers never know or care whether an alert goes to Slack, email, or nowhere (console, for local dev). Adding PagerDuty support later means writing one new class no changes anywhere else in the framework. It also makes the framework fully testable without ever making a real network call: `InMemoryAlertDispatcher` collects messages in a list for assertions.
+
+## How dbt and Great Expectations Results End Up in the Same Place
+
+- **dbt**: `dbt_tests_integration/parse_dbt_results.py` reads the standard `target/run_results.json` artifact every `dbt test`/`dbt build` produces no dbt Cloud API, no special config, works with any dbt project.
+- **Great Expectations**: `src/great_expectations_hooks/metrics_action.py` is a custom Checkpoint action, wired into `great_expectations/checkpoints/daily_pipeline_checkpoint.yml`, that GE calls automatically after each validation run.
+
+Both paths converge on the same `MetricsRepository.record_check_result(...)` call, tagged with `check_source` (`'dbt'` vs `'great_expectations'`) can filter by source when needed, but query across both by default.
